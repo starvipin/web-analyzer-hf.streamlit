@@ -175,13 +175,13 @@ with st.sidebar:
     st.markdown(f"**Embeddings:** `{EMBEDDING_MODEL}`")
     
     if st.session_state.vector_store and openai_api_key:
-        status_icon = "✅"
+        status_icon = "Right"
         status_text = f"Ready: {len(st.session_state.processed_urls)} URL(s) processed."
     elif not openai_api_key:
-        status_icon = "🔑"
+        status_icon = "Key"
         status_text = "API Key needed."
     else:
-        status_icon = "⚠️"
+        status_icon = "!"
         status_text = "Process URLs first."
     st.info(f"{status_icon} {status_text}")
 
