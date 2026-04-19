@@ -1,5 +1,5 @@
 [project]
-name = "web-analyzer-hf-streamlit"
+name = "WebQuery.AI"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
