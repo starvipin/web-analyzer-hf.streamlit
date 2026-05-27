@@ -67,11 +67,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Sync to Hugging Face Space
-        uses: huggingface/hub-sync@v0.1.0
-        with:
-          github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: https://huggingface.co/spaces/sainivipin/LinkMind-AI
-          repo_type: space
-          space_sdk: docker
-          hf_token: ${{ secrets.HF_TOKEN }}
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add space https://sainivipin:${HF_TOKEN}@huggingface.co/spaces/sainivipin/LinkMind-AI
+          git push --force space HEAD:main
