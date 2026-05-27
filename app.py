@@ -44,6 +44,8 @@ SYSTEM_PROMPT = (
     "You are LinkMind AI, developed by Vipin.\n"
     "Answer questions about the user's ingested link using ONLY the provided context.\n"
     "Understand casual, misspelled, or short questions by mapping them to the closest meaning in context.\n"
+    "The context or user question may be in Hindi, English, or Hinglish. Answer in the same language style the user uses.\n"
+    "If the page is in Hindi and the user asks in Hinglish, translate the meaning internally and answer from the Hindi context.\n"
     "Always use exact model names, product names, versions, and technical details - never summarize them.\n"
     "If the answer isn't in the context, briefly state what topics you can help with from this link "
     "and ask for a more specific question. Do not say 'I don't know'.\n"
@@ -73,7 +75,16 @@ class ChatRequest(BaseModel):
 
 # --- Helper Functions ---
 def tokenize(text: str) -> set[str]:
-    return {word for word in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]+", text.lower()) if len(word) > 2}
+    return {
+        word
+        for word in re.findall(r"[\w\u0900-\u097F][\w\u0900-\u097F_-]+", text.lower(), flags=re.UNICODE)
+        if len(word) > 1
+    }
+
+
+def char_ngrams(text: str, n: int = 3) -> set[str]:
+    normalized = re.sub(r"\s+", "", text.lower())
+    return {normalized[index:index + n] for index in range(max(len(normalized) - n + 1, 0))}
 
 
 def html_to_text(html: str) -> str:
@@ -130,6 +141,7 @@ class LocalRetrievalQA:
     def __init__(self, docs: list[Document]):
         self.docs = docs
         self.doc_tokens = [tokenize(doc.page_content) for doc in docs]
+        self.doc_ngrams = [char_ngrams(doc.page_content) for doc in docs]
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
             ("human", "{input}"),
@@ -143,17 +155,37 @@ class LocalRetrievalQA:
             max_retries=OPENAI_MAX_RETRIES,
         )
 
+    def expand_query(self, query: str) -> str:
+        try:
+            messages = [
+                (
+                    "system",
+                    "Rewrite the user's search query into concise Hindi/English keywords for retrieval. "
+                    "Include direct translations when the query is Hinglish. Return only keywords.",
+                ),
+                ("human", query),
+            ]
+            response = self.llm.invoke(messages)
+            expanded = response.content.strip()
+            return f"{query}\n{expanded}" if expanded else query
+        except (APIConnectionError, APIStatusError, AuthenticationError, RateLimitError, AttributeError):
+            logger.info("Query expansion unavailable; using original query.", exc_info=True)
+            return query
+
     def retrieve(self, query: str, k: int = 8) -> list[Document]:
-        query_tokens = tokenize(query)
-        if not query_tokens:
+        expanded_query = self.expand_query(query)
+        query_tokens = tokenize(expanded_query)
+        query_ngrams = char_ngrams(expanded_query)
+        if not query_tokens and not query_ngrams:
             return self.docs[:k]
 
         scored_docs = []
-        query_lower = query.lower()
+        query_lower = expanded_query.lower()
         for index, doc in enumerate(self.docs):
             token_score = len(query_tokens.intersection(self.doc_tokens[index]))
+            ngram_score = len(query_ngrams.intersection(self.doc_ngrams[index])) / 8
             phrase_score = doc.page_content.lower().count(query_lower) * 3
-            scored_docs.append((token_score + phrase_score, index, doc))
+            scored_docs.append((token_score + ngram_score + phrase_score, index, doc))
 
         scored_docs.sort(key=lambda item: item[0], reverse=True)
         selected = [doc for score, _, doc in scored_docs if score > 0][:k]
@@ -178,6 +210,8 @@ class LocalRetrievalQA:
 
         if best:
             return " ".join(best)
+        if ranked:
+            return " ".join(sentence for _, sentence in ranked[:2])
         return (
             "I can help with the information available in this link, such as its features, "
             "tech stack, models used, or setup details. Please ask a specific question."

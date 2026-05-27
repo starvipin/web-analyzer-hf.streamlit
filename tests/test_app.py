@@ -20,6 +20,11 @@ class FakeChain:
         return {"answer": self.answer}
 
 
+class FakeLLMResponse:
+    def __init__(self, content):
+        self.content = content
+
+
 @pytest.fixture(autouse=True)
 def reset_app_state(monkeypatch):
     with app_module.STATE_LOCK:
@@ -137,6 +142,36 @@ def test_local_retrieval_selects_relevant_context(monkeypatch):
 
     assert "gpt-4o-mini" in result
     assert "text-embedding-3-small" in result
+
+
+def test_local_retrieval_handles_hindi_context_and_hinglish_question(monkeypatch):
+    docs = [
+        app_module.Document(page_content="यह पेज LinkMind AI के बारे में सामान्य जानकारी देता है।", metadata={}),
+        app_module.Document(page_content="इस ऐप को Vipin ने विकसित किया है।", metadata={}),
+    ]
+
+    monkeypatch.setattr(
+        app_module.ChatOpenAI,
+        "invoke",
+        lambda self, messages: FakeLLMResponse("किसने बनाया विकसित किया"),
+    )
+    qa = app_module.LocalRetrievalQA(docs)
+
+    result = qa.extractive_fallback("isko kisne banaya hai", qa.retrieve("isko kisne banaya hai"))
+
+    assert "Vipin" in result
+
+
+def test_query_expansion_falls_back_when_openai_is_unavailable(monkeypatch):
+    def raise_connection_error(self, messages):
+        raise app_module.APIConnectionError(request=None)
+
+    monkeypatch.setattr(app_module.ChatOpenAI, "invoke", raise_connection_error)
+    qa = app_module.LocalRetrievalQA([
+        app_module.Document(page_content="यह पेज हिंदी जानकारी रखता है।", metadata={}),
+    ])
+
+    assert qa.expand_query("hindi jankari") == "hindi jankari"
 
 
 def test_ingest_uses_microlink_fallback_for_forbidden_url(monkeypatch):
