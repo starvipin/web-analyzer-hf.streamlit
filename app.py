@@ -4,6 +4,7 @@ from threading import Lock
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 LLM_MODEL = "gpt-4o-mini" 
 EMBEDDING_MODEL = "text-embedding-3-small"
+APP_VERSION = "2026-05-27-2"
+OPENAI_TIMEOUT_SECONDS = 45
+OPENAI_MAX_RETRIES = 3
 REQUEST_HEADERS = {
     "User-Agent": os.environ["USER_AGENT"],
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
@@ -103,17 +107,6 @@ def load_and_index_urls(url: str):
 
     try:
         docs = [fetch_url_document(url)]
-
-        docs = [doc for doc in docs if len(doc.page_content) > 50]
-        if not docs:
-            return None, "Content is too short or empty."
-
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        splits = text_splitter.split_documents(docs)
-
-        embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=openai_api_key)
-        vectorstore = FAISS.from_documents(splits, embeddings)
-        return vectorstore, "Success"
     except requests.HTTPError as e:
         status_code = e.response.status_code if e.response is not None else "unknown"
         logger.error(f"Ingestion HTTP error for {url}: {e}", exc_info=True)
@@ -121,6 +114,35 @@ def load_and_index_urls(url: str):
     except requests.RequestException as e:
         logger.error(f"Ingestion connection error for {url}: {e}", exc_info=True)
         return None, f"Could not connect to the URL from the server: {e}"
+
+    docs = [doc for doc in docs if len(doc.page_content) > 50]
+    if not docs:
+        return None, "Content is too short or empty."
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    splits = text_splitter.split_documents(docs)
+
+    try:
+        embeddings = OpenAIEmbeddings(
+            model=EMBEDDING_MODEL,
+            openai_api_key=openai_api_key,
+            timeout=OPENAI_TIMEOUT_SECONDS,
+            max_retries=OPENAI_MAX_RETRIES,
+        )
+        vectorstore = FAISS.from_documents(splits, embeddings)
+        return vectorstore, "Success"
+    except AuthenticationError:
+        logger.error("OpenAI authentication failed during embeddings.", exc_info=True)
+        return None, "OpenAI API key is invalid or missing in the Hugging Face Space secrets."
+    except RateLimitError:
+        logger.error("OpenAI rate limit hit during embeddings.", exc_info=True)
+        return None, "OpenAI rate limit or quota exceeded while creating embeddings."
+    except APIConnectionError as e:
+        logger.error("OpenAI connection error during embeddings.", exc_info=True)
+        return None, f"OpenAI embeddings connection failed from the server. Check Space networking/proxy and OPENAI_API_KEY. Detail: {e}"
+    except APIStatusError as e:
+        logger.error("OpenAI status error during embeddings.", exc_info=True)
+        return None, f"OpenAI embeddings API returned HTTP {e.status_code}."
     except Exception as e:
         logger.error(f"Ingestion error: {e}", exc_info=True)
         return None, str(e)
@@ -130,7 +152,14 @@ def setup_qa_chain(vector_store):
         ("system", SYSTEM_PROMPT),
         ("human", "{input}"),
     ])
-    llm = ChatOpenAI(model=LLM_MODEL, temperature=0.1, openai_api_key=openai_api_key, max_tokens=300)
+    llm = ChatOpenAI(
+        model=LLM_MODEL,
+        temperature=0.1,
+        openai_api_key=openai_api_key,
+        max_tokens=300,
+        timeout=OPENAI_TIMEOUT_SECONDS,
+        max_retries=OPENAI_MAX_RETRIES,
+    )
     retriever = vector_store.as_retriever(search_kwargs={"k": 8})
     combine_docs_chain = create_stuff_documents_chain(llm, prompt)
     return create_retrieval_chain(retriever, combine_docs_chain)
@@ -142,6 +171,16 @@ def setup_qa_chain(vector_store):
 async def serve_ui(request: Request):
     # FIXED: Modern FastAPI/Starlette syntax to prevent "unhashable type: 'dict'"
     return templates.TemplateResponse(request=request, name="index.html")
+
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "version": APP_VERSION,
+        "openai_key_configured": bool(openai_api_key),
+        "llm_model": LLM_MODEL,
+        "embedding_model": EMBEDDING_MODEL,
+    }
 
 @app.post("/api/ingest")
 async def ingest_url(req: URLRequest):

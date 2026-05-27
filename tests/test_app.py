@@ -41,6 +41,16 @@ def test_home_page_serves_ui(client):
     assert "LinkMind AI" in response.text
 
 
+def test_health_reports_runtime_config(client):
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["version"] == app_module.APP_VERSION
+    assert response.json()["openai_key_configured"] is True
+    assert response.json()["embedding_model"] == app_module.EMBEDDING_MODEL
+
+
 def test_ingest_rejects_invalid_url(client):
     response = client.post(
         "/api/ingest",
