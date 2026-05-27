@@ -71,7 +71,7 @@ jobs:
         uses: huggingface/hub-sync@v0.1.0
         with:
           github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: sainivipin/LinkMind-AI
+          huggingface_repo_id: https://huggingface.co/spaces/sainivipin/LinkMind-AI
           repo_type: space
           space_sdk: docker
           hf_token: ${{ secrets.HF_TOKEN }}
