@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -136,6 +137,27 @@ def test_local_retrieval_selects_relevant_context(monkeypatch):
 
     assert "gpt-4o-mini" in result
     assert "text-embedding-3-small" in result
+
+
+def test_ingest_uses_microlink_fallback_for_forbidden_url(monkeypatch):
+    def blocked_fetch(url):
+        response = requests.Response()
+        response.status_code = 403
+        raise requests.HTTPError(response=response)
+
+    fallback_doc = app_module.Document(
+        page_content="Fallback page title. Fallback description with enough readable content to index.",
+        metadata={"source": "https://blocked.example"},
+    )
+
+    monkeypatch.setattr(app_module, "fetch_url_document", blocked_fetch)
+    monkeypatch.setattr(app_module, "fetch_url_document_via_microlink", lambda url: fallback_doc)
+
+    docs, message = app_module.load_and_index_urls("https://blocked.example")
+
+    assert message == "Success"
+    assert docs
+    assert "Fallback page title" in docs[0].page_content
 
 
 def test_chat_requires_ingested_url_first(client):

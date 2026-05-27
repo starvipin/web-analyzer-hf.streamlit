@@ -38,6 +38,7 @@ REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
 }
+MICROLINK_API_URL = "https://api.microlink.io/"
 
 SYSTEM_PROMPT = (
     "You are LinkMind AI, developed by Vipin.\n"
@@ -98,6 +99,29 @@ def fetch_url_document(url: str) -> Document:
         text = html_to_text(response.text)
     else:
         text = response.text
+
+    return Document(page_content=text, metadata={"source": url})
+
+
+def fetch_url_document_via_microlink(url: str) -> Document:
+    response = requests.get(MICROLINK_API_URL, params={"url": url}, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+
+    if payload.get("status") != "success":
+        raise ValueError(payload.get("message") or "Microlink could not fetch this URL.")
+
+    data = payload.get("data", {})
+    parts = [
+        data.get("title", ""),
+        data.get("description", ""),
+        data.get("publisher", ""),
+        data.get("author", ""),
+    ]
+    text = "\n\n".join(part.strip() for part in parts if isinstance(part, str) and part.strip())
+
+    if len(text) <= 50:
+        raise ValueError("Microlink fallback did not return enough readable content.")
 
     return Document(page_content=text, metadata={"source": url})
 
@@ -182,7 +206,17 @@ def load_and_index_urls(url: str):
     except requests.HTTPError as e:
         status_code = e.response.status_code if e.response is not None else "unknown"
         logger.error(f"Ingestion HTTP error for {url}: {e}", exc_info=True)
-        return None, f"URL returned HTTP {status_code}. The site may be blocking automated access."
+        if status_code in (401, 403, 429):
+            try:
+                docs = [fetch_url_document_via_microlink(url)]
+            except Exception as fallback_error:
+                logger.error(f"Microlink fallback failed for {url}: {fallback_error}", exc_info=True)
+                return None, (
+                    f"URL returned HTTP {status_code}. The site is blocking automated access, "
+                    "and fallback preview extraction also failed."
+                )
+        else:
+            return None, f"URL returned HTTP {status_code}. The site may be blocking automated access."
     except requests.RequestException as e:
         logger.error(f"Ingestion connection error for {url}: {e}", exc_info=True)
         return None, f"Could not connect to the URL from the server: {e}"
