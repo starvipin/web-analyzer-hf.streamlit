@@ -1,6 +1,8 @@
 FROM python:3.13-slim
 
-RUN useradd -m -u 1000 user
+RUN useradd -m -u 1000 user \
+    && mkdir -p /home/user/app \
+    && chown -R user:user /home/user/app
 
 ENV HOME=/home/user \
     VIRTUAL_ENV=/home/user/app/.venv \
@@ -8,7 +10,7 @@ ENV HOME=/home/user \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-WORKDIR $HOME/app
+WORKDIR /home/user/app
 
 RUN pip install --no-cache-dir --upgrade pip uv
 
