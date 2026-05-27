@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkMind AI</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        body {
+            background-color: #09090b; 
+            color: #fafafa;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* --- Landing Page Styling --- */
+        #landing-page {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            text-align: center;
+            width: 100%;
+            max-width: 800px;
+            animation: fadeIn 0.8s ease-in-out;
+        }
+
+        .main-title {
+            font-size: 4.5rem;
+            font-weight: 900;
+            background: linear-gradient(135deg, #a855f7, #3b82f6, #06b6d4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 5px;
+            line-height: 1.2;
+        }
+
+        .sub-title { color: #a1a1aa; font-size: 1.2rem; margin-bottom: 40px; }
+
+        .url-input-container {
+            width: 100%;
+            max-width: 600px;
+            display: flex;
+            align-items: center;
+            background-color: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 12px;
+            padding: 8px 16px;
+            transition: all 0.3s ease;
+        }
+        
+        .url-input-container:focus-within {
+            border-color: #3b82f6;
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.3);
+        }
+
+        .url-input-container span { font-size: 1.2rem; margin-right: 10px; }
+
+        input[type="text"] {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #ffffff;
+            font-size: 1.1rem;
+            outline: none;
+            padding: 10px 0;
+        }
+
+        #status-msg { margin-top: 20px; color: #60a5fa; font-weight: bold; min-height: 24px;}
+
+        /* --- Chat Page Styling --- */
+        #chat-page {
+            display: none;
+            flex-direction: column;
+            width: 100%;
+            max-width: 800px;
+            height: 100vh;
+            padding: 20px;
+            animation: fadeIn 0.5s ease-in-out;
+        }
+
+        .chat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #27272a;
+        }
+
+        .active-url-badge {
+            background: rgba(59, 130, 246, 0.1);
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+        }
+
+        .close-btn {
+            background: #27272a;
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .close-btn:hover { background: #3f3f46; }
+
+        .chat-box {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .msg { padding: 12px 18px; border-radius: 12px; max-width: 80%; line-height: 1.5;}
+        .msg.user { background: #2563eb; color: white; align-self: flex-end; }
+        .msg.bot { background: #18181b; color: #e4e4e7; border: 1px solid #27272a; align-self: flex-start; }
+
+        .chat-input-container {
+            display: flex;
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 12px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+
+        .chat-input-container input {
+            text-align: left;
+            padding-left: 10px;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="landing-page">
+        <div class="main-title">LinkMind AI</div>
+        <div class="sub-title">Paste a link. Hit Enter. Talk to the web.</div>
+        
+        <div class="url-input-container">
+            <span>🔗</span>
+            <input type="text" id="urlInput" placeholder="https://example.com..." autocomplete="off">
+        </div>
+        <div id="status-msg"></div>
+    </div>
+
+    <div id="chat-page">
+        <div class="chat-header">
+            <div class="active-url-badge" id="activeUrlText">🟢 Synched: Unknown URL</div>
+            <button class="close-btn" onclick="resetApp()">✖ Close</button>
+        </div>
+        
+        <div class="chat-box" id="chatBox">
+            </div>
+
+        <div class="chat-input-container">
+            <input type="text" id="chatInput" placeholder="Ask a question about this website..." autocomplete="off">
+        </div>
+    </div>
+
+    <script>
+        const urlInput = document.getElementById("urlInput");
+        const statusMsg = document.getElementById("status-msg");
+        const landingPage = document.getElementById("landing-page");
+        const chatPage = document.getElementById("chat-page");
+        const activeUrlText = document.getElementById("activeUrlText");
+        const chatInput = document.getElementById("chatInput");
+        const chatBox = document.getElementById("chatBox");
+
+        // --- URL INGESTION ---
+        urlInput.addEventListener("keypress", async function(event) {
+            if (event.key === "Enter") {
+                const url = urlInput.value.trim();
+                if (!url.startsWith("http")) {
+                    statusMsg.innerText = "⚠️ Please include http:// or https://";
+                    statusMsg.style.color = "#ef4444";
+                    return;
+                }
+                
+                statusMsg.innerText = "✨ Initializing Neural Engine & Extracting data...";
+                statusMsg.style.color = "#60a5fa";
+                
+                try {
+                    const response = await fetch('/api/ingest', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: url })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if(response.ok) {
+                        statusMsg.innerText = "System Ready!";
+                        setTimeout(() => {
+                            landingPage.style.display = "none";
+                            chatPage.style.display = "flex";
+                            activeUrlText.innerText = "🟢 Synched: " + url;
+                        }, 500);
+                    } else {
+                        statusMsg.innerText = "❌ Error: " + data.detail;
+                        statusMsg.style.color = "#ef4444";
+                    }
+                } catch (error) {
+                    statusMsg.innerText = "❌ Connection Failed.";
+                    statusMsg.style.color = "#ef4444";
+                }
+            }
+        });
+
+        // --- CHAT LOGIC ---
+        chatInput.addEventListener("keypress", async function(event) {
+            if (event.key === "Enter" && chatInput.value.trim() !== "") {
+                const query = chatInput.value.trim();
+                chatInput.value = "";
+                
+                // Add User Message
+                addMessage(query, "user");
+                
+                // Add Bot Loading State
+                const botId = "bot-loading-" + Date.now();
+                addMessage("Decoding...", "bot", botId);
+
+                try {
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ query: query })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if(response.ok) {
+                        document.getElementById(botId).innerText = data.answer;
+                    } else {
+                        document.getElementById(botId).innerText = "❌ Error: " + data.detail;
+                    }
+                } catch (error) {
+                    document.getElementById(botId).innerText = "❌ Failed to connect to server.";
+                }
+            }
+        });
+
+        // Helper function to append chats
+        function addMessage(text, sender, id = null) {
+            const msgDiv = document.createElement("div");
+            msgDiv.className = `msg ${sender}`;
+            msgDiv.innerText = text;
+            if (id) msgDiv.id = id;
+            chatBox.appendChild(msgDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // Reset application to landing view
+        function resetApp() {
+            chatPage.style.display = "none";
+            landingPage.style.display = "flex";
+            urlInput.value = "";
+            statusMsg.innerText = "";
+            chatBox.innerHTML = "";
+        }
+    </script>
+</body>
+</html>
