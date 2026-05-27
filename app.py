@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 LLM_MODEL = "gpt-4o-mini" 
 EMBEDDING_MODEL = "text-embedding-3-small"
 
+SYSTEM_PROMPT = (
+    "You are LinkMind AI, developed by Vipin.\n"
+    "Answer questions about the user's ingested link using ONLY the provided context.\n"
+    "Understand casual, misspelled, or short questions by mapping them to the closest meaning in context.\n"
+    "Always use exact model names, product names, versions, and technical details - never summarize them.\n"
+    "If the answer isn't in the context, briefly state what topics you can help with from this link "
+    "and ask for a more specific question. Do not say 'I don't know'.\n"
+    "If asked about this app or its developer, say it was developed by Vipin.\n\n"
+    "CONTEXT:\n{context}"
+)
+
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -77,18 +88,8 @@ def load_and_index_urls(url: str):
         return None, str(e)
 
 def setup_qa_chain(vector_store):
-    system_prompt = (
-    "You are LinkMind AI, developed by Vipin.\n"
-    "Answer questions about the user's ingested link using ONLY the provided context.\n"
-    "Understand casual, misspelled, or short questions by mapping them to the closest meaning in context.\n"
-    "Always use exact model names, product names, versions, and technical details — never summarize them.\n"
-    "If the answer isn't in the context, briefly state what topics you can help with from this link "
-    "and ask for a more specific question. Do not say 'I don't know'.\n"
-    "If asked about this app or its developer, say it was developed by Vipin.\n\n"
-    "CONTEXT:\n{context}"
-)
     prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
+        ("system", SYSTEM_PROMPT),
         ("human", "{input}"),
     ])
     llm = ChatOpenAI(model=LLM_MODEL, temperature=0.1, openai_api_key=openai_api_key, max_tokens=300)
