@@ -1,6 +1,8 @@
 import os
 import logging
 from threading import Lock
+import requests
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -15,11 +17,10 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 # --- ENV FIXES ---
 os.environ["USER_AGENT"] = "MyWebAnalyzerApp/1.0"
 
-# --- LangChain Imports ---
-from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
@@ -31,6 +32,11 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 LLM_MODEL = "gpt-4o-mini" 
 EMBEDDING_MODEL = "text-embedding-3-small"
+REQUEST_HEADERS = {
+    "User-Agent": os.environ["USER_AGENT"],
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 SYSTEM_PROMPT = (
     "You are LinkMind AI, developed by Vipin.\n"
@@ -64,14 +70,39 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default", min_length=1, max_length=128)
 
 # --- Helper Functions ---
+def html_to_text(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+        tag.decompose()
+
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    description_tag = soup.find("meta", attrs={"name": "description"})
+    description = description_tag.get("content", "").strip() if description_tag else ""
+    body_text = soup.get_text("\n", strip=True)
+
+    return "\n\n".join(part for part in [title, description, body_text] if part)
+
+
+def fetch_url_document(url: str) -> Document:
+    response = requests.get(url, headers=REQUEST_HEADERS, timeout=25, allow_redirects=True)
+    response.raise_for_status()
+
+    content_type = response.headers.get("content-type", "")
+    if "text/html" in content_type or "xml" in content_type:
+        text = html_to_text(response.text)
+    else:
+        text = response.text
+
+    return Document(page_content=text, metadata={"source": url})
+
+
 def load_and_index_urls(url: str):
     if not openai_api_key:
         return None, "OpenAI API Key not configured."
 
     try:
-        loader = WebBaseLoader([url], requests_per_second=2, continue_on_failure=True)
-        loader.requests_kwargs = {'timeout': 20}
-        docs = loader.load()
+        docs = [fetch_url_document(url)]
 
         docs = [doc for doc in docs if len(doc.page_content) > 50]
         if not docs:
@@ -83,6 +114,13 @@ def load_and_index_urls(url: str):
         embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, openai_api_key=openai_api_key)
         vectorstore = FAISS.from_documents(splits, embeddings)
         return vectorstore, "Success"
+    except requests.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else "unknown"
+        logger.error(f"Ingestion HTTP error for {url}: {e}", exc_info=True)
+        return None, f"URL returned HTTP {status_code}. The site may be blocking automated access."
+    except requests.RequestException as e:
+        logger.error(f"Ingestion connection error for {url}: {e}", exc_info=True)
+        return None, f"Could not connect to the URL from the server: {e}"
     except Exception as e:
         logger.error(f"Ingestion error: {e}", exc_info=True)
         return None, str(e)
