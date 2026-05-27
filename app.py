@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from threading import Lock
 import requests
 from bs4 import BeautifulSoup
@@ -19,12 +20,9 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 os.environ["USER_AGENT"] = "MyWebAnalyzerApp/1.0"
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,8 +30,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 LLM_MODEL = "gpt-4o-mini" 
-EMBEDDING_MODEL = "text-embedding-3-small"
-APP_VERSION = "2026-05-27-2"
+APP_VERSION = "2026-05-27-3"
 OPENAI_TIMEOUT_SECONDS = 45
 OPENAI_MAX_RETRIES = 3
 REQUEST_HEADERS = {
@@ -74,6 +71,10 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="default", min_length=1, max_length=128)
 
 # --- Helper Functions ---
+def tokenize(text: str) -> set[str]:
+    return {word for word in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]+", text.lower()) if len(word) > 2}
+
+
 def html_to_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -101,6 +102,77 @@ def fetch_url_document(url: str) -> Document:
     return Document(page_content=text, metadata={"source": url})
 
 
+class LocalRetrievalQA:
+    def __init__(self, docs: list[Document]):
+        self.docs = docs
+        self.doc_tokens = [tokenize(doc.page_content) for doc in docs]
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM_PROMPT),
+            ("human", "{input}"),
+        ])
+        self.llm = ChatOpenAI(
+            model=LLM_MODEL,
+            temperature=0.1,
+            openai_api_key=openai_api_key,
+            max_tokens=300,
+            timeout=OPENAI_TIMEOUT_SECONDS,
+            max_retries=OPENAI_MAX_RETRIES,
+        )
+
+    def retrieve(self, query: str, k: int = 8) -> list[Document]:
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            return self.docs[:k]
+
+        scored_docs = []
+        query_lower = query.lower()
+        for index, doc in enumerate(self.docs):
+            token_score = len(query_tokens.intersection(self.doc_tokens[index]))
+            phrase_score = doc.page_content.lower().count(query_lower) * 3
+            scored_docs.append((token_score + phrase_score, index, doc))
+
+        scored_docs.sort(key=lambda item: item[0], reverse=True)
+        selected = [doc for score, _, doc in scored_docs if score > 0][:k]
+        return selected or self.docs[:k]
+
+    def extractive_fallback(self, query: str, context_docs: list[Document]) -> str:
+        query_tokens = tokenize(query)
+        sentences = []
+        for doc in context_docs:
+            sentences.extend(re.split(r"(?<=[.!?])\s+|\n+", doc.page_content))
+
+        ranked = []
+        for sentence in sentences:
+            clean_sentence = " ".join(sentence.split())
+            if len(clean_sentence) < 20:
+                continue
+            score = len(query_tokens.intersection(tokenize(clean_sentence)))
+            ranked.append((score, clean_sentence))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        best = [sentence for score, sentence in ranked if score > 0][:3]
+
+        if best:
+            return " ".join(best)
+        return (
+            "I can help with the information available in this link, such as its features, "
+            "tech stack, models used, or setup details. Please ask a specific question."
+        )
+
+    def invoke(self, payload: dict) -> dict:
+        query = payload["input"]
+        context_docs = self.retrieve(query)
+        context = "\n\n".join(doc.page_content for doc in context_docs)
+
+        try:
+            messages = self.prompt.format_messages(context=context, input=query)
+            response = self.llm.invoke(messages)
+            return {"answer": response.content, "context": context_docs}
+        except (APIConnectionError, APIStatusError, AuthenticationError, RateLimitError):
+            logger.error("OpenAI chat failed; using local extractive fallback.", exc_info=True)
+            return {"answer": self.extractive_fallback(query, context_docs), "context": context_docs}
+
+
 def load_and_index_urls(url: str):
     if not openai_api_key:
         return None, "OpenAI API Key not configured."
@@ -121,48 +193,10 @@ def load_and_index_urls(url: str):
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     splits = text_splitter.split_documents(docs)
+    return splits, "Success"
 
-    try:
-        embeddings = OpenAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            openai_api_key=openai_api_key,
-            timeout=OPENAI_TIMEOUT_SECONDS,
-            max_retries=OPENAI_MAX_RETRIES,
-        )
-        vectorstore = FAISS.from_documents(splits, embeddings)
-        return vectorstore, "Success"
-    except AuthenticationError:
-        logger.error("OpenAI authentication failed during embeddings.", exc_info=True)
-        return None, "OpenAI API key is invalid or missing in the Hugging Face Space secrets."
-    except RateLimitError:
-        logger.error("OpenAI rate limit hit during embeddings.", exc_info=True)
-        return None, "OpenAI rate limit or quota exceeded while creating embeddings."
-    except APIConnectionError as e:
-        logger.error("OpenAI connection error during embeddings.", exc_info=True)
-        return None, f"OpenAI embeddings connection failed from the server. Check Space networking/proxy and OPENAI_API_KEY. Detail: {e}"
-    except APIStatusError as e:
-        logger.error("OpenAI status error during embeddings.", exc_info=True)
-        return None, f"OpenAI embeddings API returned HTTP {e.status_code}."
-    except Exception as e:
-        logger.error(f"Ingestion error: {e}", exc_info=True)
-        return None, str(e)
-
-def setup_qa_chain(vector_store):
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{input}"),
-    ])
-    llm = ChatOpenAI(
-        model=LLM_MODEL,
-        temperature=0.1,
-        openai_api_key=openai_api_key,
-        max_tokens=300,
-        timeout=OPENAI_TIMEOUT_SECONDS,
-        max_retries=OPENAI_MAX_RETRIES,
-    )
-    retriever = vector_store.as_retriever(search_kwargs={"k": 8})
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(retriever, combine_docs_chain)
+def setup_qa_chain(docs: list[Document]):
+    return LocalRetrievalQA(docs)
 
 
 # --- API Routes ---
@@ -179,7 +213,7 @@ async def health():
         "version": APP_VERSION,
         "openai_key_configured": bool(openai_api_key),
         "llm_model": LLM_MODEL,
-        "embedding_model": EMBEDDING_MODEL,
+        "retrieval": "local-keyword",
     }
 
 @app.post("/api/ingest")

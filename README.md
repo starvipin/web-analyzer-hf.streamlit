@@ -16,9 +16,9 @@ LinkMind AI is a FastAPI web app developed by Vipin. Paste a URL, let the app in
 
 - URL ingestion with `WebBaseLoader`
 - Chunking with `RecursiveCharacterTextSplitter`
-- FAISS vector retrieval
+- Local keyword retrieval, so ingest does not depend on OpenAI embeddings
 - OpenAI chat responses with `gpt-4o-mini`
-- OpenAI embeddings with `text-embedding-3-small`
+- Extractive fallback answers if the OpenAI chat request is temporarily unavailable
 - Browser session IDs so each user keeps their own active link context
 - Docker deployment for Hugging Face Spaces
 

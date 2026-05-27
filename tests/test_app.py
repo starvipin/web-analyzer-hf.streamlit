@@ -48,7 +48,7 @@ def test_health_reports_runtime_config(client):
     assert response.json()["status"] == "ok"
     assert response.json()["version"] == app_module.APP_VERSION
     assert response.json()["openai_key_configured"] is True
-    assert response.json()["embedding_model"] == app_module.EMBEDDING_MODEL
+    assert response.json()["retrieval"] == "local-keyword"
 
 
 def test_ingest_rejects_invalid_url(client):
@@ -118,6 +118,24 @@ def test_html_to_text_removes_noise_and_keeps_page_content():
     assert "text-embedding-3-small" in text
     assert "alert" not in text
     assert ".hidden" not in text
+
+
+def test_local_retrieval_selects_relevant_context(monkeypatch):
+    docs = [
+        app_module.Document(page_content="Installation steps for a FastAPI app.", metadata={}),
+        app_module.Document(
+            page_content="OpenAI Integration: Powered by gpt-4o-mini and text-embedding-3-small.",
+            metadata={},
+        ),
+    ]
+
+    monkeypatch.setattr(app_module.ChatOpenAI, "invoke", lambda self, messages: None)
+    qa = app_module.LocalRetrievalQA(docs)
+
+    result = qa.extractive_fallback("what is powered by this project", qa.retrieve("powered by"))
+
+    assert "gpt-4o-mini" in result
+    assert "text-embedding-3-small" in result
 
 
 def test_chat_requires_ingested_url_first(client):
