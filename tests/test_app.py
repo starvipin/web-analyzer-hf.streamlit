@@ -186,13 +186,35 @@ def test_ingest_uses_microlink_fallback_for_forbidden_url(monkeypatch):
     )
 
     monkeypatch.setattr(app_module, "fetch_url_document", blocked_fetch)
-    monkeypatch.setattr(app_module, "fetch_url_document_via_microlink", lambda url: fallback_doc)
+    monkeypatch.setattr(app_module, "fetch_url_document_via_jina", lambda url: fallback_doc)
 
     docs, message = app_module.load_and_index_urls("https://blocked.example")
 
     assert message == "Success"
     assert docs
     assert "Fallback page title" in docs[0].page_content
+
+
+def test_ingest_uses_microlink_if_reader_fallback_fails(monkeypatch):
+    def blocked_fetch(url):
+        response = requests.Response()
+        response.status_code = 403
+        raise requests.HTTPError(response=response)
+
+    fallback_doc = app_module.Document(
+        page_content="Microlink title. Microlink description with enough readable content to index.",
+        metadata={"source": "https://blocked.example"},
+    )
+
+    monkeypatch.setattr(app_module, "fetch_url_document", blocked_fetch)
+    monkeypatch.setattr(app_module, "fetch_url_document_via_jina", lambda url: (_ for _ in ()).throw(ValueError("reader failed")))
+    monkeypatch.setattr(app_module, "fetch_url_document_via_microlink", lambda url: fallback_doc)
+
+    docs, message = app_module.load_and_index_urls("https://blocked.example")
+
+    assert message == "Success"
+    assert docs
+    assert "Microlink title" in docs[0].page_content
 
 
 def test_chat_requires_ingested_url_first(client):

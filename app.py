@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 LLM_MODEL = "gpt-4o-mini" 
-APP_VERSION = "2026-05-27-3"
+APP_VERSION = "2026-05-28-1"
 OPENAI_TIMEOUT_SECONDS = 45
 OPENAI_MAX_RETRIES = 3
 REQUEST_HEADERS = {
@@ -39,6 +39,7 @@ REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 MICROLINK_API_URL = "https://api.microlink.io/"
+JINA_READER_URL = "https://r.jina.ai/"
 
 SYSTEM_PROMPT = (
     "You are LinkMind AI, developed by Vipin.\n"
@@ -110,6 +111,17 @@ def fetch_url_document(url: str) -> Document:
         text = html_to_text(response.text)
     else:
         text = response.text
+
+    return Document(page_content=text, metadata={"source": url})
+
+
+def fetch_url_document_via_jina(url: str) -> Document:
+    response = requests.get(f"{JINA_READER_URL}{url}", timeout=40)
+    response.raise_for_status()
+    text = response.text.strip()
+
+    if len(text) <= 50:
+        raise ValueError("Jina Reader fallback did not return enough readable content.")
 
     return Document(page_content=text, metadata={"source": url})
 
@@ -242,13 +254,17 @@ def load_and_index_urls(url: str):
         logger.error(f"Ingestion HTTP error for {url}: {e}", exc_info=True)
         if status_code in (401, 403, 429):
             try:
-                docs = [fetch_url_document_via_microlink(url)]
-            except Exception as fallback_error:
-                logger.error(f"Microlink fallback failed for {url}: {fallback_error}", exc_info=True)
-                return None, (
-                    f"URL returned HTTP {status_code}. The site is blocking automated access, "
-                    "and fallback preview extraction also failed."
-                )
+                docs = [fetch_url_document_via_jina(url)]
+            except Exception as jina_error:
+                logger.error(f"Jina Reader fallback failed for {url}: {jina_error}", exc_info=True)
+                try:
+                    docs = [fetch_url_document_via_microlink(url)]
+                except Exception as fallback_error:
+                    logger.error(f"Microlink fallback failed for {url}: {fallback_error}", exc_info=True)
+                    return None, (
+                        f"URL returned HTTP {status_code}. The site is blocking automated access, "
+                        "and both reader and preview fallback extraction failed."
+                    )
         else:
             return None, f"URL returned HTTP {status_code}. The site may be blocking automated access."
     except requests.RequestException as e:
