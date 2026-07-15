@@ -92,7 +92,7 @@ Request:
 
 ### `POST /api/chat`
 
-Answers a question about the active URL for the session.
+Answers a question about the active URL for the session. 
 
 Request:
 
