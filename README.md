@@ -223,7 +223,14 @@ The GitHub Actions pipeline:
 
 ```text
 .
-├── app.py
+├── app.py                  # Compatibility entry point for HF / uvicorn
+├── src/                    # Main Python application code
+│   ├── __init__.py
+│   ├── main.py             # FastAPI routes and session state
+│   ├── config.py           # Environment, paths, and runtime settings
+│   ├── schemas.py          # URL/chat request validation
+│   ├── ingestion.py        # Fetch URL, clean HTML, and create chunks
+│   └── retrieval.py        # Search chunks and generate answers
 ├── Dockerfile
 ├── README.md
 ├── pyproject.toml
@@ -235,10 +242,22 @@ The GitHub Actions pipeline:
 │   └── index.html
 ├── tests/
 │   └── test_app.py
+├── docs/
+│   └── CODE_WALKTHROUGH.md  # Interview explanation in Hinglish
 └── .github/
     └── workflows/
         └── ci-cd.yml
 ```
+
+Start reading at `src/main.py`, then follow `load_and_index_urls()` into
+`src/ingestion.py` and `LocalRetrievalQA` into `src/retrieval.py`.
+See the [interview code walkthrough](docs/CODE_WALKTHROUGH.md) for the request
+flow and a file-by-file explanation.
+
+The existing `uvicorn app:app` command still works through the small root
+entry point. You can also run `uv run uvicorn src.main:app --reload`.
+Docker, the Hugging Face port, dependency versions, and API URLs are unchanged.
+Static files, templates, and `.env` are located relative to the project root.
 
 ## Limitations
 

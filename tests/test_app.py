@@ -1,3 +1,5 @@
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,7 +9,8 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import app as app_module
+from src import config, ingestion, main as app_module, retrieval
+from langchain_core.documents import Document
 
 
 class FakeChain:
@@ -29,7 +32,7 @@ class FakeLLMResponse:
 def reset_app_state(monkeypatch):
     with app_module.STATE_LOCK:
         app_module.SESSION_STATES.clear()
-    monkeypatch.setattr(app_module, "openai_api_key", "test-key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
     yield
     with app_module.STATE_LOCK:
         app_module.SESSION_STATES.clear()
@@ -67,7 +70,7 @@ def test_ingest_rejects_invalid_url(client):
 
 
 def test_ingest_requires_openai_key(client, monkeypatch):
-    monkeypatch.setattr(app_module, "openai_api_key", None)
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
 
     response = client.post(
         "/api/ingest",
@@ -116,7 +119,7 @@ def test_html_to_text_removes_noise_and_keeps_page_content():
     </html>
     """
 
-    text = app_module.html_to_text(html)
+    text = ingestion.html_to_text(html)
 
     assert "LinkMind AI" in text
     assert "Talk to the web." in text
@@ -128,15 +131,15 @@ def test_html_to_text_removes_noise_and_keeps_page_content():
 
 def test_local_retrieval_selects_relevant_context(monkeypatch):
     docs = [
-        app_module.Document(page_content="Installation steps for a FastAPI app.", metadata={}),
-        app_module.Document(
+        Document(page_content="Installation steps for a FastAPI app.", metadata={}),
+        Document(
             page_content="OpenAI Integration: Powered by gpt-4o-mini and text-embedding-3-small.",
             metadata={},
         ),
     ]
 
-    monkeypatch.setattr(app_module.ChatOpenAI, "invoke", lambda self, messages: None)
-    qa = app_module.LocalRetrievalQA(docs)
+    monkeypatch.setattr(retrieval.ChatOpenAI, "invoke", lambda self, messages: None)
+    qa = retrieval.LocalRetrievalQA(docs)
 
     result = qa.extractive_fallback("what is powered by this project", qa.retrieve("powered by"))
 
@@ -146,16 +149,16 @@ def test_local_retrieval_selects_relevant_context(monkeypatch):
 
 def test_local_retrieval_handles_hindi_context_and_hinglish_question(monkeypatch):
     docs = [
-        app_module.Document(page_content="यह पेज LinkMind AI के बारे में सामान्य जानकारी देता है।", metadata={}),
-        app_module.Document(page_content="इस ऐप को Vipin ने विकसित किया है।", metadata={}),
+        Document(page_content="यह पेज LinkMind AI के बारे में सामान्य जानकारी देता है।", metadata={}),
+        Document(page_content="इस ऐप को Vipin ने विकसित किया है।", metadata={}),
     ]
 
     monkeypatch.setattr(
-        app_module.ChatOpenAI,
+        retrieval.ChatOpenAI,
         "invoke",
         lambda self, messages: FakeLLMResponse("किसने बनाया विकसित किया"),
     )
-    qa = app_module.LocalRetrievalQA(docs)
+    qa = retrieval.LocalRetrievalQA(docs)
 
     result = qa.extractive_fallback("isko kisne banaya hai", qa.retrieve("isko kisne banaya hai"))
 
@@ -164,31 +167,31 @@ def test_local_retrieval_handles_hindi_context_and_hinglish_question(monkeypatch
 
 def test_query_expansion_falls_back_when_openai_is_unavailable(monkeypatch):
     def raise_connection_error(self, messages):
-        raise app_module.APIConnectionError(request=None)
+        raise retrieval.APIConnectionError(request=None)
 
-    monkeypatch.setattr(app_module.ChatOpenAI, "invoke", raise_connection_error)
-    qa = app_module.LocalRetrievalQA([
-        app_module.Document(page_content="यह पेज हिंदी जानकारी रखता है।", metadata={}),
+    monkeypatch.setattr(retrieval.ChatOpenAI, "invoke", raise_connection_error)
+    qa = retrieval.LocalRetrievalQA([
+        Document(page_content="यह पेज हिंदी जानकारी रखता है।", metadata={}),
     ])
 
     assert qa.expand_query("hindi jankari") == "hindi jankari"
 
 
-def test_ingest_uses_microlink_fallback_for_forbidden_url(monkeypatch):
+def test_ingest_uses_jina_fallback_for_forbidden_url(monkeypatch):
     def blocked_fetch(url):
         response = requests.Response()
         response.status_code = 403
         raise requests.HTTPError(response=response)
 
-    fallback_doc = app_module.Document(
+    fallback_doc = Document(
         page_content="Fallback page title. Fallback description with enough readable content to index.",
         metadata={"source": "https://blocked.example"},
     )
 
-    monkeypatch.setattr(app_module, "fetch_url_document", blocked_fetch)
-    monkeypatch.setattr(app_module, "fetch_url_document_via_jina", lambda url: fallback_doc)
+    monkeypatch.setattr(ingestion, "fetch_url_document", blocked_fetch)
+    monkeypatch.setattr(ingestion, "fetch_url_document_via_jina", lambda url: fallback_doc)
 
-    docs, message = app_module.load_and_index_urls("https://blocked.example")
+    docs, message = ingestion.load_and_index_urls("https://blocked.example")
 
     assert message == "Success"
     assert docs
@@ -201,16 +204,16 @@ def test_ingest_uses_microlink_if_reader_fallback_fails(monkeypatch):
         response.status_code = 403
         raise requests.HTTPError(response=response)
 
-    fallback_doc = app_module.Document(
+    fallback_doc = Document(
         page_content="Microlink title. Microlink description with enough readable content to index.",
         metadata={"source": "https://blocked.example"},
     )
 
-    monkeypatch.setattr(app_module, "fetch_url_document", blocked_fetch)
-    monkeypatch.setattr(app_module, "fetch_url_document_via_jina", lambda url: (_ for _ in ()).throw(ValueError("reader failed")))
-    monkeypatch.setattr(app_module, "fetch_url_document_via_microlink", lambda url: fallback_doc)
+    monkeypatch.setattr(ingestion, "fetch_url_document", blocked_fetch)
+    monkeypatch.setattr(ingestion, "fetch_url_document_via_jina", lambda url: (_ for _ in ()).throw(ValueError("reader failed")))
+    monkeypatch.setattr(ingestion, "fetch_url_document_via_microlink", lambda url: fallback_doc)
 
-    docs, message = app_module.load_and_index_urls("https://blocked.example")
+    docs, message = ingestion.load_and_index_urls("https://blocked.example")
 
     assert message == "Success"
     assert docs
@@ -254,8 +257,159 @@ def test_chat_uses_matching_session_chain(client):
 
 
 def test_system_prompt_keeps_exact_details_and_vipin_identity():
-    prompt = app_module.SYSTEM_PROMPT
+    prompt = retrieval.SYSTEM_PROMPT
 
     assert "developed by Vipin" in prompt
     assert "exact model names" in prompt
     assert "Do not say 'I don't know'" in prompt
+
+
+def test_ingest_and_chat_with_real_pipeline(client, monkeypatch):
+    """Exercise module wiring while replacing only the HTTP and LLM calls."""
+    page = requests.Response()
+    page.status_code = 200
+    page.headers["content-type"] = "text/html"
+    page._content = (
+        b"<html><body><script>discard this script</script>"
+        b"<p>LinkMind AI was developed by Vipin using FastAPI and gpt-4o-mini.</p>"
+        b"<p>" + b"The app answers questions about ingested webpages. " * 60
+        + b"</p></body></html>"
+    )
+    http_calls = []
+    llm_calls = []
+
+    def fake_get(url, **kwargs):
+        http_calls.append((url, kwargs))
+        return page
+
+    def fake_invoke(self, messages):
+        llm_calls.append(messages)
+        if len(llm_calls) == 1:
+            return FakeLLMResponse("developed Vipin")
+        assert "Vipin" in messages[0].content
+        assert messages[1].content == "Who developed LinkMind AI?"
+        return FakeLLMResponse("Vipin developed LinkMind AI.")
+
+    monkeypatch.setattr(ingestion.requests, "get", fake_get)
+    monkeypatch.setattr(retrieval.ChatOpenAI, "invoke", fake_invoke)
+
+    response = client.post("/api/ingest", json={
+        "url": "https://example.com/article", "session_id": "pipeline",
+    })
+    assert response.status_code == 200
+    chunks = app_module.SESSION_STATES["pipeline"]["vector_store"]
+    assert len(chunks) > 1
+    assert all(len(chunk.page_content) <= 1000 for chunk in chunks)
+    assert all(chunk.metadata["source"] == "https://example.com/article" for chunk in chunks)
+    assert "discard this script" not in " ".join(chunk.page_content for chunk in chunks)
+    assert len(http_calls) == 1
+    assert http_calls[0][0] == "https://example.com/article"
+    assert http_calls[0][1]["timeout"] == 25
+
+    response = client.post("/api/chat", json={
+        "query": "Who developed LinkMind AI?", "session_id": "pipeline",
+    })
+    assert response.status_code == 200
+    assert response.json() == {"answer": "Vipin developed LinkMind AI."}
+    assert len(llm_calls) == 2
+
+
+def test_chat_returns_extracted_text_when_openai_fails(client, monkeypatch):
+    def unavailable(self, messages):
+        raise retrieval.APIConnectionError(request=None)
+
+    monkeypatch.setattr(retrieval.ChatOpenAI, "invoke", unavailable)
+    chain = retrieval.LocalRetrievalQA([
+        Document(page_content="Vipin developed LinkMind AI using FastAPI."),
+    ])
+    with app_module.STATE_LOCK:
+        app_module.SESSION_STATES["offline"] = {"qa_chain": chain}
+
+    response = client.post("/api/chat", json={
+        "query": "Who developed LinkMind AI?", "session_id": "offline",
+    })
+    assert response.status_code == 200
+    assert "Vipin developed LinkMind AI" in response.json()["answer"]
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429])
+def test_real_fetch_fallback_order(monkeypatch, status_code):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        response = requests.Response()
+        if len(calls) == 1:
+            response.status_code = status_code
+        elif len(calls) == 2:
+            response.status_code = 503
+        else:
+            response.status_code = 200
+            response._content = (
+                b'{"status":"success","data":{"title":"LinkMind AI",'
+                b'"description":"A readable preview with enough text for indexing the webpage."}}'
+            )
+            assert kwargs["params"] == {"url": "https://blocked.example"}
+        return response
+
+    monkeypatch.setattr(ingestion.requests, "get", fake_get)
+    docs, message = ingestion.load_and_index_urls("https://blocked.example")
+    assert message == "Success"
+    assert "readable preview" in docs[0].page_content
+    assert calls == [
+        "https://blocked.example",
+        "https://r.jina.ai/https://blocked.example",
+        "https://api.microlink.io/",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["empty", "connection", "not_found"])
+def test_failed_ingest_preserves_existing_session(client, monkeypatch, failure):
+    existing = {"qa_chain": FakeChain("previous answer"), "active_url": "https://old.example"}
+    with app_module.STATE_LOCK:
+        app_module.SESSION_STATES["existing"] = existing
+
+    def fake_get(url, **kwargs):
+        if failure == "connection":
+            raise requests.ConnectionError("Connection unavailable")
+        response = requests.Response()
+        response.status_code = 404 if failure == "not_found" else 200
+        response._content = b""
+        return response
+
+    monkeypatch.setattr(ingestion.requests, "get", fake_get)
+    response = client.post("/api/ingest", json={
+        "url": "https://example.com/empty", "session_id": "existing",
+    })
+    assert response.status_code == 400
+    assert response.json()["detail"].startswith("Failed to ingest URL:")
+    assert app_module.SESSION_STATES["existing"] is existing
+
+
+@pytest.mark.parametrize("entrypoint", ["app:app", "src.main:app"])
+def test_startup_and_assets_outside_project_directory(tmp_path, entrypoint):
+    """Both Uvicorn imports must serve the UI even when cwd is elsewhere."""
+    environment = os.environ.copy()
+    environment["OPENAI_API_KEY"] = "test-key"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(config.BASE_DIR), *[str(Path(path).resolve()) for path in sys.path if path]]
+    )
+    check = '''
+import sys
+from fastapi.testclient import TestClient
+from uvicorn.importer import import_from_string
+from src.main import app
+
+assert import_from_string(sys.argv[1]) is app
+with TestClient(app) as client:
+    assert "LinkMind AI" in client.get("/").text
+    for path in ("/", "/static/script.js", "/static/style.css", "/api/health"):
+        assert client.get(path).status_code == 200, path
+    assert client.get("/api/health").json()["openai_key_configured"] is True
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", check, entrypoint],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
